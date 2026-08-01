@@ -1,3 +1,4 @@
+# PATCH VERSION: caraluzzi-lever-greenhouse-2026-08-01-v2
 from __future__ import annotations
 
 import hashlib
@@ -352,11 +353,13 @@ class Evidence:
     ambiguous_actions: list[Candidate]
 
     distinct_role_count: int
+    prominent_role_count: int
     repeated_job_card_count: int
     filter_control_count: int
 
     description_length: int
     application_field_count: int
+    application_form_count: int
     file_upload_count: int
 
     board_score: int
@@ -1035,12 +1038,20 @@ def snapshot_frame(frame: Frame) -> dict[str, Any]:
                     ].filter(Boolean).join(' ')).toLowerCase();
                 };
 
-                const applicationFieldTerms = [
-                    'full name', 'first name', 'last name', 'email', 'phone',
-                    'mobile', 'resume', 'cv', 'cover letter', 'linkedin',
-                    'portfolio', 'website', 'address', 'postal', 'zip',
-                    'work authorization', 'authorized to work', 'sponsorship',
-                    'veteran', 'gender', 'race', 'disability', 'password'
+                // Only identity/contact/resume fields establish a real job
+                // application form. Broad terms such as city, state, website,
+                // and location are intentionally excluded because they commonly
+                // appear in job filters and unrelated forms.
+                const strongApplicationFieldTerms = [
+                    'full name', 'first name', 'last name', 'email', 'e-mail',
+                    'phone', 'mobile', 'resume', 'curriculum vitae', 'cv',
+                    'cover letter', 'work authorization', 'authorized to work',
+                    'sponsorship'
+                ];
+
+                const supportingApplicationFieldTerms = [
+                    'linkedin', 'portfolio', 'address', 'postal', 'zip',
+                    'veteran', 'gender', 'race', 'disability'
                 ];
 
                 const filterFieldTerms = [
@@ -1056,12 +1067,24 @@ def snapshot_frame(frame: Frame) -> dict[str, Any]:
                     'resume/cv', 'cover letter', 'quick apply'
                 ];
 
+                const formSubmitText = form => normalized([
+                    ...form.querySelectorAll(
+                        "button, input[type='submit'], input[type='button'], [role='button']"
+                    )
+                ].filter(visible).map(element => (
+                    element.innerText
+                    || element.value
+                    || element.getAttribute('aria-label')
+                    || ''
+                )).join(' ')).toLowerCase();
+
                 let filterControlCount = 0;
                 let applicationFieldCount = 0;
+                let applicationFormCount = 0;
                 let fileUploadCount = 0;
                 let applicationTextLength = 0;
 
-                const applicationContainers = new Set();
+                const formGroups = new Map();
                 const fields = [
                     ...document.querySelectorAll(
                         "input:not([type='hidden']), textarea, select"
@@ -1071,49 +1094,82 @@ def snapshot_frame(frame: Frame) -> dict[str, Any]:
                 for (const field of fields) {
                     const descriptor = fieldDescriptor(field);
                     const type = (field.type || '').toLowerCase();
-                    const form = field.closest('form') || field.parentElement;
-                    const formText = text(form).toLowerCase();
+                    const form = field.closest('form');
+                    const group = form || field.parentElement;
+
+                    if (!group) {
+                        continue;
+                    }
+
                     const isFile = type === 'file';
+                    const isStrongIdentityField = (
+                        isFile
+                        || type === 'email'
+                        || type === 'tel'
+                        || strongApplicationFieldTerms.some(
+                            term => descriptor.includes(term)
+                        )
+                    );
+                    const isSupportingField = supportingApplicationFieldTerms.some(
+                        term => descriptor.includes(term)
+                    );
                     const isFilter = (
                         type === 'search'
                         || filterFieldTerms.some(term => descriptor.includes(term))
                     );
-                    const hasApplicationDescriptor = applicationFieldTerms.some(
-                        term => descriptor.includes(term)
-                    );
-                    const hasApplicationContext = applicationContextTerms.some(
-                        term => formText.includes(term)
-                    );
 
-                    if (isFile) {
-                        fileUploadCount += 1;
-                        applicationFieldCount += 1;
-                        if (form) applicationContainers.add(form);
-                        continue;
-                    }
-
-                    if (isFilter && !hasApplicationContext) {
+                    // A field that looks like a filter stays a filter unless it
+                    // also has unmistakable identity/contact/resume semantics.
+                    if (isFilter && !isStrongIdentityField) {
                         filterControlCount += 1;
                         continue;
                     }
 
-                    if (
-                        hasApplicationDescriptor
-                        && (
-                            hasApplicationContext
-                            || type === 'password'
-                            || descriptor.includes('resume')
-                            || descriptor.includes('cover letter')
-                            || descriptor.includes('work authorization')
-                            || descriptor.includes('sponsorship')
-                        )
-                    ) {
-                        applicationFieldCount += 1;
-                        if (form) applicationContainers.add(form);
+                    if (!formGroups.has(group)) {
+                        formGroups.set(group, {
+                            strong: 0,
+                            supporting: 0,
+                            files: 0,
+                            fields: 0
+                        });
+                    }
+
+                    const record = formGroups.get(group);
+                    record.fields += 1;
+
+                    if (isStrongIdentityField) {
+                        record.strong += 1;
+                    } else if (isSupportingField) {
+                        record.supporting += 1;
+                    }
+
+                    if (isFile) {
+                        record.files += 1;
                     }
                 }
 
-                for (const container of applicationContainers) {
+                for (const [container, record] of formGroups.entries()) {
+                    const containerText = text(container).toLowerCase();
+                    const submitText = container.matches('form')
+                        ? formSubmitText(container)
+                        : containerText;
+                    const hasApplicationContext = applicationContextTerms.some(
+                        term => containerText.includes(term) || submitText.includes(term)
+                    );
+
+                    const isRealApplicationForm = (
+                        (hasApplicationContext && record.strong >= 2)
+                        || (record.files >= 1 && record.strong >= 2)
+                        || record.strong >= 3
+                    );
+
+                    if (!isRealApplicationForm) {
+                        continue;
+                    }
+
+                    applicationFormCount += 1;
+                    applicationFieldCount += record.strong + record.supporting;
+                    fileUploadCount += record.files;
                     applicationTextLength += text(container).length;
                 }
 
@@ -1140,6 +1196,7 @@ def snapshot_frame(frame: Frame) -> dict[str, Any]:
                     clickables,
                     filterControlCount,
                     applicationFieldCount,
+                    applicationFormCount,
                     fileUploadCount,
                     applicationTextLength,
                     jobCardCount: jobCards.length
@@ -1159,6 +1216,7 @@ def snapshot_frame(frame: Frame) -> dict[str, Any]:
             "clickables": [],
             "filterControlCount": 0,
             "applicationFieldCount": 0,
+            "applicationFormCount": 0,
             "fileUploadCount": 0,
             "applicationTextLength": 0,
             "jobCardCount": 0,
@@ -1581,6 +1639,10 @@ def inspect(page: Page) -> Evidence:
         int(snapshot.get("applicationFieldCount", 0) or 0)
         for _, snapshot in snapshots
     )
+    application_forms = sum(
+        int(snapshot.get("applicationFormCount", 0) or 0)
+        for _, snapshot in snapshots
+    )
     file_uploads = sum(
         int(snapshot.get("fileUploadCount", 0) or 0)
         for _, snapshot in snapshots
@@ -1590,13 +1652,17 @@ def inspect(page: Page) -> Evidence:
         for _, snapshot in snapshots
     )
 
-    distinct_role_count = len(
-        {
-            normalized_text(candidate.role_title or candidate.text)
-            for candidate in direct_jobs
-            if is_specific_role_text(candidate.role_title or candidate.text)
-        }
+    distinct_role_titles = {
+        normalized_text(candidate.role_title or candidate.text)
+        for candidate in direct_jobs
+        if is_specific_role_text(candidate.role_title or candidate.text)
+    }
+    distinct_role_titles.update(
+        normalized_text(str(sample.get("text", "")))
+        for sample in role_samples
+        if is_specific_role_text(str(sample.get("text", "")))
     )
+    distinct_role_count = len(distinct_role_titles)
 
     specific_url_evidence = looks_like_job_url(page.url) or len(records) == 1
 
@@ -1680,9 +1746,8 @@ def inspect(page: Page) -> Evidence:
             and filter_controls == 0
         )
 
-    application_only = bool(
-        not conclusive_individual
-        and description_length < MIN_DESCRIPTION_LENGTH
+    has_real_application_form = bool(
+        application_forms >= 1
         and application_fields >= 2
         and (
             file_uploads >= 1
@@ -1694,17 +1759,30 @@ def inspect(page: Page) -> Evidence:
     has_board_structure = bool(
         len(direct_jobs) >= 2
         or distinct_role_count >= 2
+        or similarly_prominent_roles >= 2
         or repeated_job_cards >= 2
         or filter_controls >= 2
         or len(records) > 1
     )
 
+    # Application-only is deliberately terminal only when the page has a real
+    # identity/contact/resume form and no useful route toward a job description.
+    # This protects careers landing pages such as Caraluzzi's while preserving
+    # Lever/Greenhouse application-form backtracking.
+    application_only = bool(
+        not conclusive_individual
+        and description_length < MIN_DESCRIPTION_LENGTH
+        and has_real_application_form
+        and not direct_jobs
+        and not discovery
+    )
+
     if conclusive_individual:
         stage = "detail"
-    elif application_only:
-        stage = "application"
     elif has_board_structure or board_score >= 100:
         stage = "board"
+    elif application_only:
+        stage = "application"
     else:
         stage = "landing"
 
@@ -1745,10 +1823,12 @@ def inspect(page: Page) -> Evidence:
         discovery=discovery,
         ambiguous_actions=ambiguous_actions,
         distinct_role_count=distinct_role_count,
+        prominent_role_count=similarly_prominent_roles,
         repeated_job_card_count=repeated_job_cards,
         filter_control_count=filter_controls,
         description_length=description_length,
         application_field_count=application_fields,
+        application_form_count=application_forms,
         file_upload_count=file_uploads,
         board_score=board_score,
         detail_score=detail_score,
@@ -2113,7 +2193,9 @@ def explore(
             f"jobs={len(evidence.direct_jobs)}, "
             f"discover={len(evidence.discovery)}, "
             f"roles={evidence.distinct_role_count}, "
+            f"prominent={evidence.prominent_role_count}, "
             f"description={evidence.description_length}, "
+            f"app_forms={evidence.application_form_count}, "
             f"app_fields={evidence.application_field_count}."
         ),
     )
@@ -2126,6 +2208,36 @@ def explore(
 
     if depth >= MAX_DEPTH or not state.can_try():
         return None
+
+    # Useful forward routes are explored before trusting an application-only
+    # label. This is a safety net for mixed careers pages that contain short
+    # role blurbs or unrelated forms alongside real job/discovery links.
+    for candidate in evidence.direct_jobs[:MAX_DIRECT_JOB_LINKS]:
+        result = explore_candidate(
+            context=context,
+            source_evidence=evidence,
+            candidate=candidate,
+            depth=depth,
+            state=state,
+        )
+
+        if result:
+            return result
+
+    # A landing page should follow obvious discovery actions with no AI call.
+    for candidate in evidence.discovery[:MAX_DISCOVERY_ACTIONS]:
+        log("rules", f'Strong discovery action: "{short_label(candidate)}".')
+
+        result = explore_candidate(
+            context=context,
+            source_evidence=evidence,
+            candidate=candidate,
+            depth=depth,
+            state=state,
+        )
+
+        if result:
+            return result
 
     if evidence.application_only:
         parent = application_parent_url(evidence.content_url)
@@ -2159,34 +2271,6 @@ def explore(
                         branch.close()
 
         return None
-
-    # A job board should open one specific role before considering anything else.
-    for candidate in evidence.direct_jobs[:MAX_DIRECT_JOB_LINKS]:
-        result = explore_candidate(
-            context=context,
-            source_evidence=evidence,
-            candidate=candidate,
-            depth=depth,
-            state=state,
-        )
-
-        if result:
-            return result
-
-    # A landing page should follow obvious discovery actions with no AI call.
-    for candidate in evidence.discovery[:MAX_DISCOVERY_ACTIONS]:
-        log("rules", f'Strong discovery action: "{short_label(candidate)}".')
-
-        result = explore_candidate(
-            context=context,
-            source_evidence=evidence,
-            candidate=candidate,
-            depth=depth,
-            state=state,
-        )
-
-        if result:
-            return result
 
     # Only one ambiguous AI-selected action is tried. We do not append and click
     # every remaining control on the page.
