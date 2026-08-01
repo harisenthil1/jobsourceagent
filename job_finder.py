@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 
 from playwright.sync_api import (
     BrowserContext,
     Error as PlaywrightError,
+    Frame,
     Page,
     TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
@@ -53,104 +55,321 @@ BOARD_SIGNALS = (
     "view jobs",
     "number of jobs",
     "employment type",
+    "clear filters",
+    "sort by",
+    "filter by",
+    "all jobs",
 )
 
-DETAIL_SIGNALS = (
+DESCRIPTION_SIGNALS = (
     "responsibilities",
     "qualifications",
     "requirements",
     "job description",
     "about the role",
+    "about this role",
+    "what you'll do",
+    "what you will do",
+    "what we're looking for",
+    "what we are looking for",
     "duties",
     "compensation",
     "salary",
     "benefits",
+    "the role",
+    "your impact",
 )
 
-GENERIC_HEADINGS = (
-    "careers",
-    "jobs",
+JOB_METADATA_SIGNALS = (
+    "full time",
+    "full-time",
+    "part time",
+    "part-time",
+    "remote",
+    "hybrid",
+    "on-site",
+    "onsite",
+    "posted",
+    "salary",
+    "per hour",
+    "employment type",
+    "location",
+    "department",
+)
+
+APPLICATION_SIGNALS = (
+    "submit application",
+    "submit your application",
+    "apply for this job",
+    "upload resume",
+    "upload your resume",
+    "attach resume",
+    "resume/cv",
+    "cover letter",
+    "candidate information",
+    "personal information",
+    "create account",
+    "sign in to apply",
+    "quick apply",
+)
+
+DISCOVERY_ACTION_TERMS = (
+    "view open positions",
+    "view openings",
+    "see openings",
+    "current openings",
+    "current job listings",
+    "search jobs",
+    "view jobs",
+    "open positions",
+    "job listings",
+    "explore jobs",
+    "browse jobs",
+    "find jobs",
+    "view opportunities",
+    "job opportunities",
     "join our team",
     "work with us",
-    "current job listings",
-    "current openings",
-    "job openings",
+    "start here",
+    "explore opportunities",
+    "see all jobs",
+    "all open roles",
 )
 
-ACTION_SCORES = {
-    "view jobs": 150,
-    "search jobs": 150,
-    "current openings": 145,
-    "current job listings": 145,
-    "job listings": 140,
-    "open positions": 135,
-    "view openings": 135,
-    "see openings": 130,
-    "view opportunities": 120,
-    "job opportunities": 120,
-    "view job": 145,
-    "job details": 145,
-    "apply now": 75,
-    "apply online": 65,
-    "start here": 55,
-    "explore opportunities": 45,
-    "join us": 40,
-    "learn more": 20,
-}
-
-NEGATIVE_ACTIONS = (
+APPLICATION_ACTION_TERMS = (
+    "apply",
+    "apply now",
+    "apply online",
+    "apply for this job",
+    "quick apply",
+    "submit application",
+    "submit your application",
     "login",
     "log in",
     "register",
     "sign in",
     "sign up",
-    "submit resume",
     "upload resume",
-    "contact",
-    "newsletter",
-    "partner",
-    "reseller",
-    "sales",
+    "submit resume",
 )
 
-MAX_DEPTH = 3
-MAX_TOTAL_ATTEMPTS = 8
-MAX_ACTIONS_PER_PAGE = 5
+BACKWARD_ACTION_TERMS = (
+    "back to jobs",
+    "back to job listings",
+    "return to jobs",
+    "return to listings",
+    "all jobs",
+    "view all jobs",
+    "back",
+)
+
+UTILITY_ACTION_TERMS = (
+    "create alert",
+    "create job alert",
+    "job alert",
+    "sign up for job alerts",
+    "quick apply with mygreenhouse",
+    "mygreenhouse",
+    "open menu",
+    "toggle flyout",
+    "toggle menu",
+    "menu",
+    "home",
+    "homepage",
+    "company website",
+    "share",
+    "save job",
+    "print",
+)
+
+GENERIC_ROLE_TEXT = {
+    "careers",
+    "career",
+    "jobs",
+    "current jobs",
+    "current openings",
+    "job openings",
+    "current job listings",
+    "search jobs",
+    "view jobs",
+    "apply",
+    "apply now",
+    "apply online",
+    "apply for this job",
+    "join our team",
+    "work with us",
+    "learn more",
+    "sales",
+    "engineering",
+    "operations",
+    "marketing",
+    "finance",
+    "administration",
+    "customer service",
+    "product",
+}
+
+NON_ROLE_TITLE_TERMS = (
+    "fraud",
+    "fraudulent",
+    "beware",
+    "important",
+    "privacy",
+    "cookie",
+    "terms",
+    "about us",
+    "life at",
+    "why join",
+    "our values",
+    "our benefits",
+    "benefits and perks",
+)
+
+HARD_EXCLUDED_LABELS = {
+    "privacy",
+    "privacy policy",
+    "cookie policy",
+    "cookie preferences",
+    "set cookie preferences",
+    "terms",
+    "terms of use",
+    "terms and conditions",
+    "legal",
+    "accessibility",
+    "newsletter",
+    "contact",
+    "contact us",
+    "investor relations",
+    "social media",
+    "create alert",
+    "create job alert",
+    "quick apply with mygreenhouse",
+    "toggle flyout",
+    "open menu",
+}
+
+HARD_EXCLUDED_URL_PARTS = (
+    "/privacy",
+    "/cookie",
+    "/terms",
+    "/legal",
+    "/accessibility",
+    "/contact",
+    "/investor",
+    "/login",
+    "/sign-in",
+    "/signin",
+    "/register",
+    "/job-alert",
+    "/alerts",
+)
+
+APPLICATION_PATH_SUFFIXES = {
+    "apply",
+    "application",
+    "apply-now",
+    "job-application",
+    "submit-application",
+}
+
+ACTION_SCORES = {
+    "view open positions": 180,
+    "view job": 170,
+    "job details": 170,
+    "view position": 165,
+    "view jobs": 160,
+    "search jobs": 160,
+    "current openings": 155,
+    "current job listings": 155,
+    "job listings": 150,
+    "open positions": 150,
+    "view openings": 145,
+    "see openings": 140,
+    "view opportunities": 130,
+    "job opportunities": 130,
+    "start here": 75,
+    "explore opportunities": 60,
+    "join us": 55,
+    "learn more": 20,
+}
+
+CLICKABLE_SELECTOR = (
+    "a[href], button, [role='button'], [onclick], "
+    "[data-href], [data-url], "
+    "input[type='button'], input[type='submit'], "
+    "[tabindex]:not([tabindex='-1'])"
+)
+
+COOKIE_ACCEPT_TEXT = re.compile(
+    r"^(accept|accept all|allow all|agree|i agree|got it|ok|okay)$",
+    re.IGNORECASE,
+)
+
+# Exploration is cheap; AI is used only for genuinely vague choices.
+MAX_DEPTH = 4
+MAX_TOTAL_ATTEMPTS = 10
 MAX_DIRECT_JOB_LINKS = 3
+MAX_DISCOVERY_ACTIONS = 3
+
+MIN_DESCRIPTION_LENGTH = 400
+STRONG_DESCRIPTION_LENGTH = 700
 
 
 class JobFinderError(RuntimeError):
-    """Raised when a specific open-job URL cannot be found."""
+    """Raised when one specific open-job URL cannot be found."""
 
 
 @dataclass(frozen=True)
 class Candidate:
     index: int | None
+    frame_url: str
+    frame_name: str
     text: str
+    role_title: str
     url: str
     context: str
     score: int
     kind: str
 
     def key(self, source_url: str) -> str:
-        target = self.url or f"index:{self.index}"
-
-        return (
-            f"{source_url}|{self.kind}|"
-            f"{target}|{self.text[:60]}"
+        target = self.url or (
+            f"{self.frame_url}|{self.index}|"
+            f"{self.role_title}|{self.text[:80]}"
         )
+        return f"{source_url}|{self.kind}|{target}"
 
 
 @dataclass(frozen=True)
 class Evidence:
-    url: str
+    page_url: str
+    content_url: str
     title: str
     heading: str
     summary: str
+
     direct_jobs: list[Candidate]
-    actions: list[Candidate]
+    discovery: list[Candidate]
+    ambiguous_actions: list[Candidate]
+
+    distinct_role_count: int
+    repeated_job_card_count: int
+    filter_control_count: int
+
+    description_length: int
+    application_field_count: int
+    file_upload_count: int
+
     board_score: int
-    progress_score: int
+    detail_score: int
+    application_score: int
+
+    specific_role_title: str
+    specific_role_evidence: bool
+    specific_url_evidence: bool
+
+    stage: str
+    conclusive_individual: bool
+    application_only: bool
     final_job_url: str | None
     signature: str
 
@@ -166,33 +385,26 @@ class State:
 
 
 def log(category: str, message: str) -> None:
-    """Print one concise process message."""
+    """Print one concise process line."""
 
     print(f"[{category}] {message}")
 
 
 def clean_url(url: str) -> str:
-    """Validate a URL and remove its fragment."""
+    """Validate an HTTP(S) URL and remove its fragment."""
 
     cleaned = url.strip()
 
     if not cleaned:
-        raise JobFinderError(
-            "No careers-page URL was provided."
-        )
+        raise JobFinderError("No careers-page URL was provided.")
 
     if "://" not in cleaned:
         cleaned = f"https://{cleaned}"
 
     parsed = urlsplit(cleaned)
 
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.netloc
-    ):
-        raise JobFinderError(
-            "Invalid careers-page URL."
-        )
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise JobFinderError("Invalid careers-page URL.")
 
     return urlunsplit(
         (
@@ -205,29 +417,33 @@ def clean_url(url: str) -> str:
     )
 
 
+def url_identity(url: str) -> str:
+    """Return a normalized URL for equality checks."""
+
+    parsed = urlsplit(clean_url(url))
+
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower().removeprefix("www."),
+            parsed.path.rstrip("/") or "/",
+            "",
+            "",
+        )
+    )
+
+
 def hostname(url: str) -> str:
     """Return a normalized hostname."""
 
-    return (
-        urlsplit(url)
-        .netloc
-        .lower()
-        .removeprefix("www.")
-    )
+    return urlsplit(url).netloc.lower().removeprefix("www.")
 
 
-def matches_domain(
-    url: str,
-    domains: tuple[str, ...],
-) -> bool:
+def matches_domain(url: str, domains: tuple[str, ...]) -> bool:
     """Check whether a URL belongs to one of the supplied domains."""
 
     host = hostname(url)
-
-    return any(
-        host == domain or host.endswith(f".{domain}")
-        for domain in domains
-    )
+    return any(host == domain or host.endswith(f".{domain}") for domain in domains)
 
 
 def is_ats(url: str) -> bool:
@@ -236,698 +452,1370 @@ def is_ats(url: str) -> bool:
     return matches_domain(url, ATS_DOMAINS)
 
 
+def is_application_url(url: str) -> bool:
+    """Return whether the URL clearly enters an application flow."""
+
+    if not url:
+        return False
+
+    parsed = urlsplit(url)
+    parts = [part.lower() for part in parsed.path.split("/") if part]
+
+    if parts and parts[-1] in APPLICATION_PATH_SUFFIXES:
+        return True
+
+    query = parse_qs(parsed.query.lower())
+    return any(key in query for key in ("apply", "application"))
+
+
+def application_parent_url(url: str) -> str | None:
+    """Derive a likely job-description URL from an application URL."""
+
+    parsed = urlsplit(clean_url(url))
+    parts = [part for part in parsed.path.split("/") if part]
+
+    if not parts or parts[-1].lower() not in APPLICATION_PATH_SUFFIXES:
+        return None
+
+    path = "/" + "/".join(parts[:-1])
+
+    if path == "/":
+        return None
+
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
 def looks_like_job_url(url: str) -> bool:
-    """Conservatively identify an individual job URL."""
+    """Conservatively recognize a URL for one specific job."""
+
+    if not url or is_application_url(url):
+        return False
 
     parsed = urlsplit(url)
     host = parsed.netloc.lower()
     path = parsed.path.lower().rstrip("/")
+    parts = [part for part in path.split("/") if part]
 
-    parts = [
-        part
-        for part in path.split("/")
-        if part
-    ]
-
-    if host.endswith(
-        (
-            "jobs.lever.co",
-            "jobs.ashbyhq.com",
-        )
-    ):
+    if host.endswith(("jobs.lever.co", "jobs.ashbyhq.com")):
         return len(parts) >= 2
 
     if "greenhouse.io" in host:
-        return "/jobs/" in f"{path}/"
+        if re.search(r"/jobs/\d+(?:[-/]|$)", path):
+            return True
+        query = parse_qs(parsed.query)
+        return bool(query.get("gh_jid"))
 
     if "myworkdayjobs.com" in host:
         return "/job/" in f"{path}/"
 
     if "applicantpro.com" in host:
-        return (
-            "/jobs/" in f"{path}/"
-            and parts[-1:] not in [
-                ["jobs"],
-                ["search"],
-            ]
+        return bool(re.search(r"/jobs/[^/]+", path)) and not path.endswith(
+            ("/jobs", "/jobs/search")
         )
 
+    if "smartrecruiters.com" in host:
+        return len(parts) >= 2 and parts[-1] not in {"jobs", "search"}
+
+    if "workable.com" in host:
+        return "/j/" in f"{path}/"
+
+    if "recruitee.com" in host:
+        return "/o/" in f"{path}/"
+
     match = re.search(
-        (
-            r"/(?:job|jobs|position|positions|"
-            r"opening|openings)/([^/?#]+)"
-        ),
+        r"/(?:job|jobs|position|positions|opening|openings)/([^/?#]+)",
         path,
     )
 
     return bool(
         match
         and match.group(1)
-        not in {
-            "search",
-            "list",
-            "all",
-            "openings",
-        }
+        not in {"search", "list", "all", "openings", "jobs", "positions"}
     )
 
 
-def find_jobposting_urls(
-    value: Any,
-) -> list[str]:
-    """Recursively find JobPosting URLs in JSON-LD."""
+def normalized_text(value: str) -> str:
+    """Normalize text for rules."""
 
-    results: list[str] = []
+    return " ".join(value.lower().split())
+
+
+def is_specific_role_text(text: str) -> bool:
+    """Return whether text plausibly names one particular role."""
+
+    normalized = normalized_text(text)
+
+    if not normalized or len(normalized) > 180:
+        return False
+
+    if normalized in GENERIC_ROLE_TEXT:
+        return False
+
+    if any(term in normalized for term in NON_ROLE_TITLE_TERMS):
+        return False
+
+    if normalized in {
+        "view job",
+        "job details",
+        "view position",
+        "apply",
+        "apply now",
+        "apply online",
+        "apply for this job",
+        "back to jobs",
+    }:
+        return False
+
+    return 1 < len(normalized.split()) <= 18
+
+
+def is_homepage_url(url: str) -> bool:
+    """Return whether a URL points to a site's root page."""
+
+    if not url:
+        return False
+
+    parsed = urlsplit(url)
+    return parsed.path in {"", "/"} and not parsed.query
+
+
+def hard_excluded(text: str, url: str, context: str) -> bool:
+    """Remove legal, social, login, alerts, menus, and utility actions."""
+
+    label = normalized_text(text)
+    url_lower = url.lower()
+    context_lower = context.lower()
+
+    if label in HARD_EXCLUDED_LABELS:
+        return True
+
+    if any(part in url_lower for part in HARD_EXCLUDED_URL_PARTS):
+        return True
+
+    if url and matches_domain(url, IGNORED_DOMAINS):
+        return True
+
+    if label.startswith(("mailto:", "tel:")):
+        return True
+
+    if any(
+        label == phrase or label.startswith(f"{phrase} ")
+        for phrase in UTILITY_ACTION_TERMS
+    ):
+        return True
+
+    if "alert" in label and "job" in label:
+        return True
+
+    if "mygreenhouse" in label:
+        return True
+
+    if "login" in label or "sign in" in label or "register" in label:
+        return True
+
+    is_cookie_control = (
+        label
+        in {
+            "accept",
+            "accept all",
+            "allow all",
+            "agree",
+            "i agree",
+            "reject",
+            "reject all",
+            "manage preferences",
+        }
+        and ("cookie" in context_lower or "consent" in context_lower)
+    )
+
+    return is_cookie_control
+
+
+def is_backward_action(candidate: Candidate) -> bool:
+    """Return whether an action goes back to a list or earlier page."""
+
+    label = normalized_text(candidate.text)
+    return any(
+        label == phrase or label.startswith(f"{phrase} ")
+        for phrase in BACKWARD_ACTION_TERMS
+    )
+
+
+def is_application_action(candidate: Candidate) -> bool:
+    """Return whether an action enters an application or account flow."""
+
+    # On a broad careers landing page, a general "Apply now" control may
+    # actually be the route to the company's job board. Discovery takes
+    # precedence unless the destination is explicitly an application URL.
+    if not is_application_url(candidate.url) and is_discovery_action(candidate):
+        return False
+
+    if is_application_url(candidate.url):
+        return True
+
+    label = normalized_text(candidate.text)
+
+    return any(
+        label == phrase or label.startswith(f"{phrase} ")
+        for phrase in APPLICATION_ACTION_TERMS
+    )
+
+
+def is_discovery_action(candidate: Candidate) -> bool:
+    """Return whether an action is likely to reveal job listings."""
+
+    if is_application_url(candidate.url) or is_backward_action(candidate):
+        return False
+
+    label = normalized_text(candidate.text)
+    context = candidate.context.lower()
+    url_lower = candidate.url.lower()
+
+    if any(phrase in label for phrase in DISCOVERY_ACTION_TERMS):
+        return True
+
+    if any(
+        fragment in url_lower
+        for fragment in ("/careers", "/openings", "/positions", "/jobs")
+    ):
+        return not looks_like_job_url(candidate.url)
+
+    general_apply = label in {"apply", "apply now", "apply online"}
+    has_specific_role = is_specific_role_text(candidate.role_title)
+    careers_context = any(
+        phrase in context
+        for phrase in (
+            "career",
+            "join our team",
+            "job openings",
+            "open positions",
+            "current openings",
+            "employment opportunities",
+        )
+    )
+
+    return general_apply and not has_specific_role and careers_context
+
+
+def wait_for_dynamic_content(page: Page) -> None:
+    """Wait briefly for JavaScript and iframe content to stabilize."""
+
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=8_000)
+    except PlaywrightError:
+        pass
+
+    last_count = -1
+    stable_rounds = 0
+
+    for round_number in range(6):
+        total = 0
+
+        for frame in list(page.frames):
+            try:
+                total += frame.locator(CLICKABLE_SELECTOR).count()
+            except PlaywrightError:
+                pass
+
+        if total == last_count and total > 0:
+            stable_rounds += 1
+        else:
+            stable_rounds = 0
+
+        if stable_rounds >= 2 and round_number >= 2:
+            break
+
+        last_count = total
+        page.wait_for_timeout(350)
+
+
+def dismiss_cookie_banner(page: Page) -> bool:
+    """Dismiss a cookie banner without consuming a search attempt."""
+
+    selector = "button, [role='button'], input[type='button'], input[type='submit']"
+
+    script = """
+    elements => elements.map((element, index) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        const container = element.closest(
+            "[id*='cookie' i], [class*='cookie' i], "
+            + "[id*='consent' i], [class*='consent' i], "
+            + "[aria-label*='cookie' i]"
+        );
+
+        return {
+            index,
+            visible:
+                style.display !== 'none'
+                && style.visibility !== 'hidden'
+                && rect.width > 0
+                && rect.height > 0,
+            text: (
+                element.innerText
+                || element.value
+                || element.getAttribute('aria-label')
+                || ''
+            ).trim(),
+            cookieContext: Boolean(container)
+        };
+    })
+    """
+
+    for frame in list(page.frames):
+        try:
+            items = frame.locator(selector).evaluate_all(script)
+        except PlaywrightError:
+            continue
+
+        for item in items:
+            if not item.get("visible") or not item.get("cookieContext"):
+                continue
+
+            label = str(item.get("text", "")).strip()
+
+            if not COOKIE_ACCEPT_TEXT.match(label):
+                continue
+
+            try:
+                frame.locator(selector).nth(int(item["index"])).click(timeout=3_000)
+                page.wait_for_timeout(300)
+                log("cookie", "Dismissed cookie banner.")
+                return True
+            except PlaywrightError:
+                pass
+
+    return False
+
+
+def snapshot_frame(frame: Frame) -> dict[str, Any]:
+    """Collect compact DOM, layout, form, and clickable evidence."""
+
+    try:
+        return frame.evaluate(
+            """
+            () => {
+                const visible = element => {
+                    const style = getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    return (
+                        style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && rect.width > 0
+                        && rect.height > 0
+                    );
+                };
+
+                const rawText = element => (
+                    element?.innerText
+                    || element?.textContent
+                    || ''
+                );
+
+                const normalized = value => (
+                    value || ''
+                ).replace(/\\s+/g, ' ').trim();
+
+                const text = element => normalized(rawText(element));
+
+                const findSemanticContainer = element => {
+                    let current = element.parentElement;
+                    let best = element.parentElement;
+
+                    for (let depth = 0; current && depth < 8; depth += 1) {
+                        const currentText = text(current);
+                        const hasHeading = Boolean(
+                            current.querySelector('h1, h2, h3, h4')
+                        );
+                        const jobishClass = /job|position|opening|posting|vacancy/i.test(
+                            String(current.className || '')
+                        );
+
+                        if (
+                            (hasHeading || jobishClass)
+                            && currentText.length >= 15
+                            && currentText.length <= 1800
+                        ) {
+                            best = current;
+
+                            if (hasHeading && currentText.length >= 30) {
+                                return current;
+                            }
+                        }
+
+                        current = current.parentElement;
+                    }
+
+                    return best || element.parentElement;
+                };
+
+                const findRoleTitle = container => {
+                    if (!container) {
+                        return '';
+                    }
+
+                    const selectors = [
+                        "[class*='job-title' i]",
+                        "[class*='position-title' i]",
+                        "[class*='opening-title' i]",
+                        "[data-testid*='job-title' i]",
+                        'h1',
+                        'h2',
+                        'h3',
+                        'h4'
+                    ];
+
+                    for (const selector of selectors) {
+                        for (const candidate of container.querySelectorAll(selector)) {
+                            if (!visible(candidate)) {
+                                continue;
+                            }
+
+                            const value = text(candidate);
+
+                            if (value && value.length <= 180) {
+                                return value;
+                            }
+                        }
+                    }
+
+                    return '';
+                };
+
+                const clickables = [
+                    ...document.querySelectorAll(%s)
+                ].map((element, index) => {
+                    const container = findSemanticContainer(element);
+                    const rect = element.getBoundingClientRect();
+
+                    return {
+                        index,
+                        visible: visible(element),
+                        disabled: Boolean(element.disabled),
+                        tag: element.tagName.toLowerCase(),
+                        text: normalized(
+                            element.innerText
+                            || element.value
+                            || element.getAttribute('aria-label')
+                            || element.getAttribute('title')
+                            || ''
+                        ),
+                        roleTitle: findRoleTitle(container),
+                        href: (
+                            element.href
+                            || element.getAttribute('data-href')
+                            || element.getAttribute('data-url')
+                            || ''
+                        ),
+                        context: text(container).slice(0, 1600),
+                        fontSize: parseFloat(getComputedStyle(element).fontSize) || 0,
+                        width: rect.width,
+                        height: rect.height
+                    };
+                }).filter(item => item.visible);
+
+                const mainCandidates = [
+                    ...document.querySelectorAll("main, [role='main'], article")
+                ].filter(visible).sort(
+                    (first, second) => text(second).length - text(first).length
+                );
+
+                const main = mainCandidates[0] || document.body;
+                const mainText = text(main);
+
+                const headings = [
+                    ...document.querySelectorAll('h1, h2, h3, h4')
+                ].filter(visible).map(element => {
+                    const rect = element.getBoundingClientRect();
+                    const style = getComputedStyle(element);
+
+                    return {
+                        text: text(element).slice(0, 220),
+                        tag: element.tagName.toLowerCase(),
+                        fontSize: parseFloat(style.fontSize) || 0,
+                        width: rect.width,
+                        height: rect.height,
+                        top: rect.top
+                    };
+                });
+
+                const descriptionTerms = [
+                    'responsibilities',
+                    'qualifications',
+                    'requirements',
+                    'job description',
+                    'about the role',
+                    'about this role',
+                    "what you'll do",
+                    'what you will do',
+                    "what we're looking for",
+                    'what we are looking for',
+                    'duties',
+                    'compensation',
+                    'salary',
+                    'benefits',
+                    'the role',
+                    'your impact'
+                ];
+
+                const descriptionBlocks = [];
+
+                for (const heading of document.querySelectorAll(
+                    'h1, h2, h3, h4, strong'
+                )) {
+                    if (!visible(heading)) {
+                        continue;
+                    }
+
+                    const headingText = text(heading).toLowerCase();
+
+                    if (!descriptionTerms.some(term => headingText.includes(term))) {
+                        continue;
+                    }
+
+                    let container = heading.closest(
+                        'section, article, li, [class*="description" i], div'
+                    ) || heading.parentElement;
+
+                    while (
+                        container?.parentElement
+                        && text(container).length < 250
+                    ) {
+                        container = container.parentElement;
+                    }
+
+                    if (!container || !visible(container)) {
+                        continue;
+                    }
+
+                    descriptionBlocks.push({
+                        heading: text(heading).slice(0, 160),
+                        textLength: text(container).length,
+                        snippet: text(container).slice(0, 1400)
+                    });
+                }
+
+                const roleElements = [
+                    ...document.querySelectorAll(
+                        "h1, h2, h3, h4, "
+                        + "[class*='job-title' i], "
+                        + "[class*='position-title' i], "
+                        + "[class*='opening-title' i], "
+                        + "[data-testid*='job-title' i]"
+                    )
+                ].filter(visible).map(element => {
+                    const rect = element.getBoundingClientRect();
+                    const style = getComputedStyle(element);
+                    const container = findSemanticContainer(element);
+
+                    return {
+                        text: text(element).slice(0, 220),
+                        tag: element.tagName.toLowerCase(),
+                        className: String(element.className || '').slice(0, 240),
+                        fontSize: parseFloat(style.fontSize) || 0,
+                        width: rect.width,
+                        height: rect.height,
+                        top: rect.top,
+                        context: text(container).slice(0, 900)
+                    };
+                });
+
+                const fieldDescriptor = element => {
+                    const labels = element.labels
+                        ? [...element.labels].map(text).join(' ')
+                        : '';
+
+                    return normalized([
+                        labels,
+                        element.name,
+                        element.id,
+                        element.placeholder,
+                        element.getAttribute('aria-label'),
+                        element.autocomplete
+                    ].filter(Boolean).join(' ')).toLowerCase();
+                };
+
+                const applicationFieldTerms = [
+                    'full name', 'first name', 'last name', 'email', 'phone',
+                    'mobile', 'resume', 'cv', 'cover letter', 'linkedin',
+                    'portfolio', 'website', 'address', 'postal', 'zip',
+                    'work authorization', 'authorized to work', 'sponsorship',
+                    'veteran', 'gender', 'race', 'disability', 'password'
+                ];
+
+                const filterFieldTerms = [
+                    'search', 'filter', 'department', 'location', 'city',
+                    'state', 'employment type', 'job type', 'category',
+                    'team', 'sort', 'keyword'
+                ];
+
+                const applicationContextTerms = [
+                    'submit application', 'submit your application',
+                    'apply for this job', 'candidate information',
+                    'personal information', 'attach resume', 'upload resume',
+                    'resume/cv', 'cover letter', 'quick apply'
+                ];
+
+                let filterControlCount = 0;
+                let applicationFieldCount = 0;
+                let fileUploadCount = 0;
+                let applicationTextLength = 0;
+
+                const applicationContainers = new Set();
+                const fields = [
+                    ...document.querySelectorAll(
+                        "input:not([type='hidden']), textarea, select"
+                    )
+                ].filter(visible);
+
+                for (const field of fields) {
+                    const descriptor = fieldDescriptor(field);
+                    const type = (field.type || '').toLowerCase();
+                    const form = field.closest('form') || field.parentElement;
+                    const formText = text(form).toLowerCase();
+                    const isFile = type === 'file';
+                    const isFilter = (
+                        type === 'search'
+                        || filterFieldTerms.some(term => descriptor.includes(term))
+                    );
+                    const hasApplicationDescriptor = applicationFieldTerms.some(
+                        term => descriptor.includes(term)
+                    );
+                    const hasApplicationContext = applicationContextTerms.some(
+                        term => formText.includes(term)
+                    );
+
+                    if (isFile) {
+                        fileUploadCount += 1;
+                        applicationFieldCount += 1;
+                        if (form) applicationContainers.add(form);
+                        continue;
+                    }
+
+                    if (isFilter && !hasApplicationContext) {
+                        filterControlCount += 1;
+                        continue;
+                    }
+
+                    if (
+                        hasApplicationDescriptor
+                        && (
+                            hasApplicationContext
+                            || type === 'password'
+                            || descriptor.includes('resume')
+                            || descriptor.includes('cover letter')
+                            || descriptor.includes('work authorization')
+                            || descriptor.includes('sponsorship')
+                        )
+                    ) {
+                        applicationFieldCount += 1;
+                        if (form) applicationContainers.add(form);
+                    }
+                }
+
+                for (const container of applicationContainers) {
+                    applicationTextLength += text(container).length;
+                }
+
+                const jobCardSelectors = [
+                    "article[class*='job' i]",
+                    "li[class*='job' i]",
+                    "[class*='job-card' i]",
+                    "[class*='job-listing' i]",
+                    "[class*='opening-card' i]",
+                    "[data-job-id]",
+                    "[data-testid*='job-card' i]"
+                ].join(',');
+
+                const jobCards = [
+                    ...document.querySelectorAll(jobCardSelectors)
+                ].filter(visible).filter(element => text(element).length >= 20);
+
+                return {
+                    frameUrl: location.href,
+                    mainText: mainText.slice(0, 60000),
+                    headings,
+                    descriptionBlocks,
+                    roleElements,
+                    clickables,
+                    filterControlCount,
+                    applicationFieldCount,
+                    fileUploadCount,
+                    applicationTextLength,
+                    jobCardCount: jobCards.length
+                };
+            }
+            """
+            % json.dumps(CLICKABLE_SELECTOR)
+        )
+
+    except PlaywrightError:
+        return {
+            "frameUrl": frame.url,
+            "mainText": "",
+            "headings": [],
+            "descriptionBlocks": [],
+            "roleElements": [],
+            "clickables": [],
+            "filterControlCount": 0,
+            "applicationFieldCount": 0,
+            "fileUploadCount": 0,
+            "applicationTextLength": 0,
+            "jobCardCount": 0,
+        }
+
+
+def extract_jobposting_records(value: Any) -> list[dict[str, Any]]:
+    """Recursively extract JobPosting JSON-LD records."""
+
+    records: list[dict[str, Any]] = []
 
     if isinstance(value, dict):
         raw_type = value.get("@type")
+        types = raw_type if isinstance(raw_type, list) else [raw_type]
 
-        types = (
-            raw_type
-            if isinstance(raw_type, list)
-            else [raw_type]
-        )
+        if any(str(item).lower() == "jobposting" for item in types):
+            raw_description = html.unescape(
+                re.sub(r"<[^>]+>", " ", str(value.get("description", "")))
+            )
+            description = " ".join(raw_description.split())
 
-        if any(
-            str(item).lower() == "jobposting"
-            for item in types
-        ):
-            raw_url = value.get("url")
-
-            if isinstance(raw_url, str):
-                results.append(raw_url)
+            records.append(
+                {
+                    "url": str(value.get("url", "")),
+                    "title": str(value.get("title", "")),
+                    "description_length": len(description),
+                }
+            )
 
         for nested in value.values():
-            results.extend(
-                find_jobposting_urls(nested)
-            )
+            records.extend(extract_jobposting_records(nested))
 
     elif isinstance(value, list):
         for item in value:
-            results.extend(
-                find_jobposting_urls(item)
-            )
+            records.extend(extract_jobposting_records(item))
 
-    return results
+    return records
 
 
-def jsonld_job_urls(page: Page) -> list[str]:
-    """Extract job URLs from JobPosting JSON-LD."""
+def jsonld_records(page: Page) -> list[dict[str, Any]]:
+    """Read JobPosting structured data from all frames."""
 
-    try:
-        scripts = page.locator(
-            "script[type='application/ld+json']"
-        ).all_text_contents()
+    found: dict[tuple[str, str], dict[str, Any]] = {}
 
-    except PlaywrightError:
-        return []
-
-    urls: list[str] = []
-    jobposting_without_url = False
-
-    for script in scripts:
+    for frame in list(page.frames):
         try:
-            data = json.loads(script)
-
-        except (TypeError, ValueError):
+            scripts = frame.locator(
+                "script[type='application/ld+json']"
+            ).all_text_contents()
+        except PlaywrightError:
             continue
 
-        found_urls = find_jobposting_urls(data)
+        for script in scripts:
+            try:
+                data = json.loads(script)
+            except (TypeError, ValueError):
+                continue
 
-        if found_urls:
-            for raw_url in found_urls:
-                url = clean_url(
-                    urljoin(page.url, raw_url)
-                )
+            for record in extract_jobposting_records(data):
+                raw_url = record["url"]
+                base_url = frame.url or page.url
+                record["url"] = clean_url(urljoin(base_url, raw_url)) if raw_url else clean_url(base_url)
 
-                if url not in urls:
-                    urls.append(url)
+                key = (record["url"], record["title"])
+                previous = found.get(key)
 
-        elif "jobposting" in script.lower():
-            jobposting_without_url = True
+                if previous is None or record["description_length"] > previous["description_length"]:
+                    found[key] = record
 
-    if not urls and jobposting_without_url:
-        urls.append(clean_url(page.url))
-
-    return urls
+    return list(found.values())
 
 
-def collect_elements(
-    page: Page,
-) -> list[dict[str, Any]]:
-    """Collect links, buttons and embedded-frame destinations."""
+def role_score(text: str, context: str, font_size: float, tag: str) -> int:
+    """Score whether heading text plausibly names one specific role."""
 
-    selector = (
-        "a[href], button, [role='button'], "
-        "input[type='button'], input[type='submit']"
+    if not is_specific_role_text(text):
+        return -100
+
+    score = 0
+    context_lower = context.lower()
+
+    if any(term in context_lower for term in JOB_METADATA_SIGNALS):
+        score += 5
+
+    if tag == "h1":
+        score += 5
+    elif tag in {"h2", "h3"}:
+        score += 3
+
+    if font_size >= 26:
+        score += 3
+    elif font_size >= 20:
+        score += 2
+
+    return score
+
+
+def collect_role_evidence(
+    snapshots: list[tuple[Frame, dict[str, Any]]],
+) -> tuple[str, int, list[dict[str, Any]]]:
+    """Return the dominant role title and number of similarly prominent roles."""
+
+    roles: dict[str, dict[str, Any]] = {}
+
+    for _, snapshot in snapshots:
+        for item in snapshot.get("roleElements", []):
+            text = " ".join(str(item.get("text", "")).split())
+            context = str(item.get("context", ""))
+            font_size = float(item.get("fontSize", 0) or 0)
+            width = float(item.get("width", 0) or 0)
+            height = float(item.get("height", 0) or 0)
+            tag = str(item.get("tag", "")).lower()
+
+            score = role_score(text, context, font_size, tag)
+
+            if score < 4:
+                continue
+
+            prominence = (
+                max(font_size, 10)
+                * (1 + min(width, 1000) / 1000)
+                * (1 + min(height, 180) / 360)
+                * (1.25 if tag == "h1" else 1.1 if tag in {"h2", "h3"} else 1.0)
+            )
+
+            candidate = {
+                "text": text,
+                "context": " ".join(context.split())[:300],
+                "font_size": round(font_size, 1),
+                "prominence": round(prominence, 2),
+                "score": score,
+            }
+
+            key = text.lower()
+            previous = roles.get(key)
+
+            if previous is None or prominence > float(previous["prominence"]):
+                roles[key] = candidate
+
+    ordered = sorted(
+        roles.values(),
+        key=lambda item: (float(item["prominence"]), int(item["score"])),
+        reverse=True,
     )
 
-    try:
-        elements = page.locator(
-            selector
-        ).evaluate_all(
-            """
-            elements => elements.map((element, index) => {
-                const box = element.closest(
-                    "article, section, li, tr, "
-                    + ".job, .job-card, "
-                    + "[class*='job'], "
-                    + "[class*='career'], div"
-                );
+    if not ordered:
+        return "", 0, []
 
-                return {
-                    index,
+    top = float(ordered[0]["prominence"])
+    similar_count = sum(
+        float(item["prominence"]) >= top * 0.75 for item in ordered
+    )
 
-                    text: (
-                        element.innerText ||
-                        element.value ||
-                        element.getAttribute('aria-label') ||
-                        element.getAttribute('title') ||
-                        ''
-                    ).trim(),
-
-                    href: element.href || '',
-
-                    disabled: Boolean(element.disabled),
-
-                    context: (
-                        box?.innerText ||
-                        element.parentElement?.innerText ||
-                        ''
-                    ).trim().slice(0, 1000)
-                };
-            })
-            """
-        )
-
-    except PlaywrightError:
-        elements = []
-
-    try:
-        frames = page.locator(
-            "iframe[src]"
-        ).evaluate_all(
-            """
-            frames => frames.map(frame => ({
-                index: null,
-
-                text:
-                    frame.getAttribute('title')
-                    || 'Embedded jobs',
-
-                href: frame.src || '',
-
-                disabled: false,
-
-                context: (
-                    frame.parentElement?.innerText
-                    || 'Embedded jobs'
-                ).trim().slice(0, 1000)
-            }))
-            """
-        )
-
-    except PlaywrightError:
-        frames = []
-
-    return [
-        *elements,
-        *frames,
-    ]
+    return str(ordered[0]["text"]), similar_count, ordered[:8]
 
 
-def job_link_score(
+def job_candidate_score(
+    *,
     text: str,
+    role_title: str,
     url: str,
     context: str,
 ) -> int:
-    """Score whether a link represents one specific job."""
+    """Score a clickable element as a direct specific-job candidate."""
 
-    normalized_text = " ".join(
-        text.lower().split()
-    )
+    if not url or is_application_url(url):
+        return -100
 
-    context_lower = context.lower()
+    label = normalized_text(text)
+    score = 0
 
-    score = (
-        150
-        if looks_like_job_url(url)
-        else 0
-    )
+    if looks_like_job_url(url):
+        score += 180
 
-    if any(
-        term in normalized_text
-        for term in (
-            "view job",
-            "job details",
-            "view position",
-        )
-    ):
+    if any(phrase in label for phrase in ("view job", "job details", "view position")):
         score += 100
 
-    if re.search(
-        (
-            r"/(?:job|jobs|position|positions|"
-            r"opening|openings)/"
-        ),
-        url.lower(),
-    ):
-        score += 55
+    if is_specific_role_text(text):
+        score += 50
 
-    role_signals = (
-        "full time",
-        "part time",
-        "posted:",
-        "location",
-        "salary",
-        "per hour",
-    )
+    if is_specific_role_text(role_title):
+        score += 65
 
-    score += min(
-        45,
-        15 * sum(
-            term in context_lower
-            for term in role_signals
-        ),
-    )
+    if any(term in context.lower() for term in JOB_METADATA_SIGNALS):
+        score += 25
 
-    if (
-        normalized_text
-        in {
-            "careers",
-            "jobs",
-            "view jobs",
-            "search jobs",
-            "apply now",
-        }
-        and not looks_like_job_url(url)
-    ):
-        score -= 80
+    if label in {"apply", "apply now", "apply online"}:
+        if looks_like_job_url(url) and is_specific_role_text(role_title):
+            score += 55
+        else:
+            score -= 40
+
+    if is_backward_label(label):
+        return -100
 
     return score
 
 
-def action_score(
-    text: str,
-    url: str,
-    context: str,
-) -> int:
-    """Score whether an interaction may reveal specific jobs."""
+def is_backward_label(label: str) -> bool:
+    """Return whether normalized text is backward navigation."""
 
-    normalized_text = " ".join(
-        text.lower().split()
+    return any(
+        label == phrase or label.startswith(f"{phrase} ")
+        for phrase in BACKWARD_ACTION_TERMS
     )
 
-    context_lower = context.lower()
 
-    score = sum(
-        points
-        for phrase, points in ACTION_SCORES.items()
-        if phrase in normalized_text
-    )
+def action_score(text: str, role_title: str, url: str, context: str) -> int:
+    """Score a non-final navigation action."""
+
+    label = normalized_text(text)
+    score = sum(points for phrase, points in ACTION_SCORES.items() if phrase in label)
 
     if is_ats(url):
-        score += 90
+        score += 70
+
+    if any(fragment in url.lower() for fragment in ("/jobs", "/careers", "/openings", "/positions")):
+        score += 45
 
     if any(
-        term in url.lower()
-        for term in (
-            "/jobs",
-            "/job/",
-            "/careers",
-            "/openings",
-            "/positions",
-        )
+        phrase in context.lower()
+        for phrase in ("career", "hiring", "current openings", "job listings")
     ):
-        score += 60
+        score += 20
 
-    if any(
-        term in context_lower
-        for term in (
-            "career",
-            "hiring",
-            "join our team",
-            "current openings",
-            "job listings",
-        )
-    ):
-        score += 30
+    if is_specific_role_text(role_title):
+        score += 20
 
-    if any(
-        term in normalized_text
-        for term in NEGATIVE_ACTIONS
-    ):
-        score -= 140
-
-    if any(
-        term in context_lower
-        for term in (
-            "partner",
-            "reseller",
-            "sales",
-        )
-    ):
-        score -= 60
-
-    if normalized_text in {
-        "submit",
-        "upload",
-        "browse",
-    }:
-        score -= 180
+    if is_application_url(url):
+        score -= 100
 
     return score
 
 
-def candidates(
+def build_candidates(
     page: Page,
-) -> tuple[
-    list[Candidate],
-    list[Candidate],
-]:
-    """Build direct-job candidates and general action candidates."""
+    snapshots: list[tuple[Frame, dict[str, Any]]],
+) -> tuple[list[Candidate], list[Candidate], list[Candidate]]:
+    """Build direct-job, discovery, and ambiguous candidates from all frames."""
 
     direct: dict[str, Candidate] = {}
-    actions: dict[str, Candidate] = {}
+    discovery: dict[str, Candidate] = {}
+    ambiguous: dict[str, Candidate] = {}
 
-    current_url = clean_url(page.url)
+    page_identity = url_identity(page.url)
 
-    for item in collect_elements(page):
-        if item.get("disabled"):
-            continue
+    for frame, snapshot in snapshots:
+        frame_url = str(snapshot.get("frameUrl") or frame.url or page.url)
+        frame_name = frame.name or ""
 
-        text = str(
-            item.get("text", "")
-        ).strip()
+        for item in snapshot.get("clickables", []):
+            if item.get("disabled"):
+                continue
 
-        context = str(
-            item.get("context", "")
-        ).strip()
+            text = str(item.get("text", "")).strip()
+            role_title = str(item.get("roleTitle", "")).strip()
+            context = str(item.get("context", "")).strip()
+            raw_href = str(item.get("href", "")).strip()
+            index = item.get("index")
+            url = ""
 
-        raw_href = str(
-            item.get("href", "")
-        ).strip()
+            if raw_href:
+                joined = urljoin(frame_url or page.url, raw_href)
 
-        index = item.get("index")
+                if joined.startswith(("http://", "https://")):
+                    url = clean_url(joined)
 
-        url = ""
+            if hard_excluded(text, url, context):
+                continue
 
-        if raw_href:
-            joined_url = urljoin(
-                page.url,
-                raw_href,
-            )
+            if url and url_identity(url) == page_identity:
+                continue
 
-            if joined_url.startswith(
-                (
-                    "http://",
-                    "https://",
-                )
-            ):
-                url = clean_url(joined_url)
-
-                if matches_domain(
-                    url,
-                    IGNORED_DOMAINS,
-                ):
+            if url and is_homepage_url(url):
+                label = normalized_text(text)
+                if not any(term in label for term in ("jobs", "careers", "openings")):
                     continue
 
-        if url and url != current_url:
-            score = job_link_score(
+            candidate_index = int(index) if isinstance(index, int) else None
+
+            direct_score = job_candidate_score(
                 text=text,
+                role_title=role_title,
                 url=url,
                 context=context,
             )
 
-            if score >= 60:
+            if direct_score >= 100:
                 candidate = Candidate(
-                    index=None,
+                    index=candidate_index,
+                    frame_url=frame_url,
+                    frame_name=frame_name,
                     text=text,
+                    role_title=role_title,
                     url=url,
                     context=context,
-                    score=score,
+                    score=direct_score,
                     kind="job",
                 )
+                key = url or f"{frame_url}|{candidate_index}|{role_title}|{text}"
+                previous = direct.get(key)
 
-                previous = direct.get(url)
+                if previous is None or candidate.score > previous.score:
+                    direct[key] = candidate
 
-                if (
-                    previous is None
-                    or score > previous.score
-                ):
-                    direct[url] = candidate
+                continue
 
-        if text or url:
             candidate = Candidate(
-                index=(
-                    int(index)
-                    if isinstance(index, int)
-                    else None
-                ),
+                index=candidate_index,
+                frame_url=frame_url,
+                frame_name=frame_name,
                 text=text,
+                role_title=role_title,
                 url=url,
                 context=context,
-                score=action_score(
-                    text=text,
-                    url=url,
-                    context=context,
-                ),
+                score=action_score(text, role_title, url, context),
                 kind="action",
             )
 
-            key = (
-                url
-                or f"{index}:{text[:60]}"
+            if is_backward_action(candidate) or is_application_action(candidate):
+                continue
+
+            key = url or f"{frame_url}|{candidate_index}|{role_title}|{text}"
+
+            if is_discovery_action(candidate):
+                previous = discovery.get(key)
+
+                if previous is None or candidate.score > previous.score:
+                    discovery[key] = candidate
+
+                continue
+
+            if candidate.score <= 0:
+                continue
+
+            previous = ambiguous.get(key)
+
+            if previous is None or candidate.score > previous.score:
+                ambiguous[key] = candidate
+
+    return (
+        sorted(direct.values(), key=lambda item: item.score, reverse=True),
+        sorted(discovery.values(), key=lambda item: item.score, reverse=True),
+        sorted(ambiguous.values(), key=lambda item: item.score, reverse=True),
+    )
+
+
+def measure_description(
+    *,
+    snapshots: list[tuple[Frame, dict[str, Any]]],
+    records: list[dict[str, Any]],
+    specific_url_evidence: bool,
+    specific_role_title: str,
+) -> tuple[int, str, str]:
+    """Estimate visible job-description length and its owning frame URL."""
+
+    explicit_length = 0
+    explicit_url = ""
+    longest_main = ""
+    longest_url = ""
+    application_text_length = 0
+
+    for _, snapshot in snapshots:
+        frame_url = str(snapshot.get("frameUrl", ""))
+        main_text = " ".join(str(snapshot.get("mainText", "")).split())
+
+        if len(main_text) > len(longest_main):
+            longest_main = main_text
+            longest_url = frame_url
+            application_text_length = int(
+                snapshot.get("applicationTextLength", 0) or 0
             )
 
-            previous = actions.get(key)
+        for block in snapshot.get("descriptionBlocks", []):
+            block_length = int(block.get("textLength", 0) or 0)
 
-            if (
-                previous is None
-                or candidate.score > previous.score
-            ):
-                actions[key] = candidate
+            if block_length > explicit_length:
+                explicit_length = block_length
+                explicit_url = frame_url
 
-    direct_candidates = sorted(
-        direct.values(),
-        key=lambda item: item.score,
-        reverse=True,
+    jsonld_length = max(
+        (int(record.get("description_length", 0) or 0) for record in records),
+        default=0,
     )
 
-    action_candidates = sorted(
-        actions.values(),
-        key=lambda item: item.score,
-        reverse=True,
-    )
+    heuristic_length = 0
 
-    return (
-        direct_candidates,
-        action_candidates,
-    )
+    if specific_url_evidence and specific_role_title:
+        heuristic_length = max(0, len(longest_main) - application_text_length)
 
+    description_length = max(explicit_length, jsonld_length, heuristic_length)
 
-def is_generic_heading(
-    heading: str,
-) -> bool:
-    """Check whether a heading describes a general careers page."""
+    if jsonld_length >= max(explicit_length, heuristic_length) and len(records) == 1:
+        owner_url = str(records[0].get("url", "")) or longest_url
+    elif explicit_length >= heuristic_length:
+        owner_url = explicit_url or longest_url
+    else:
+        owner_url = longest_url
 
-    normalized = " ".join(
-        heading.lower().split()
-    )
-
-    return (
-        not normalized
-        or any(
-            term in normalized
-            for term in GENERIC_HEADINGS
-        )
-    )
+    return description_length, owner_url, longest_main
 
 
 def inspect(page: Page) -> Evidence:
-    """Inspect a page and calculate progress toward one job URL."""
+    """Inspect the main document and every iframe without navigating."""
 
-    page.wait_for_timeout(600)
+    snapshots = [(frame, snapshot_frame(frame)) for frame in list(page.frames)]
+    records = jsonld_records(page)
+
+    direct_jobs, discovery, ambiguous_actions = build_candidates(page, snapshots)
+
+    specific_role_title, similarly_prominent_roles, role_samples = collect_role_evidence(
+        snapshots
+    )
+
+    filter_controls = sum(
+        int(snapshot.get("filterControlCount", 0) or 0)
+        for _, snapshot in snapshots
+    )
+    application_fields = sum(
+        int(snapshot.get("applicationFieldCount", 0) or 0)
+        for _, snapshot in snapshots
+    )
+    file_uploads = sum(
+        int(snapshot.get("fileUploadCount", 0) or 0)
+        for _, snapshot in snapshots
+    )
+    repeated_job_cards = sum(
+        int(snapshot.get("jobCardCount", 0) or 0)
+        for _, snapshot in snapshots
+    )
+
+    distinct_role_count = len(
+        {
+            normalized_text(candidate.role_title or candidate.text)
+            for candidate in direct_jobs
+            if is_specific_role_text(candidate.role_title or candidate.text)
+        }
+    )
+
+    specific_url_evidence = looks_like_job_url(page.url) or len(records) == 1
+
+    description_length, owner_url, longest_main = measure_description(
+        snapshots=snapshots,
+        records=records,
+        specific_url_evidence=specific_url_evidence,
+        specific_role_title=specific_role_title,
+    )
+
+    content_url = clean_url(owner_url) if owner_url.startswith(("http://", "https://")) else clean_url(page.url)
+
+    if looks_like_job_url(content_url):
+        specific_url_evidence = True
+
+    top_context = role_samples[0]["context"] if role_samples else ""
+    role_has_metadata = any(
+        term in top_context.lower() for term in JOB_METADATA_SIGNALS
+    )
+
+    specific_role_evidence = bool(
+        is_specific_role_text(specific_role_title)
+        and (
+            specific_url_evidence
+            or role_has_metadata
+            or len(records) == 1
+        )
+    )
+
+    all_text = " ".join(
+        " ".join(str(snapshot.get("mainText", "")).split())
+        for _, snapshot in snapshots
+    )
+    lower = all_text.lower()
+
+    board_score = (
+        30 * sum(signal in lower for signal in BOARD_SIGNALS)
+        + min(180, len(direct_jobs) * 18)
+        + min(120, distinct_role_count * 20)
+        + min(80, filter_controls * 20)
+        + min(100, repeated_job_cards * 15)
+        + (100 if len(records) > 1 else 0)
+    )
+
+    detail_score = (
+        (80 if description_length >= MIN_DESCRIPTION_LENGTH else 0)
+        + (80 if description_length >= STRONG_DESCRIPTION_LENGTH else 0)
+        + (80 if specific_role_evidence else 0)
+        + (50 if specific_url_evidence else 0)
+        + (30 if similarly_prominent_roles <= 1 and specific_role_title else 0)
+    )
+
+    application_signal_count = sum(
+        signal in lower for signal in APPLICATION_SIGNALS
+    )
+    application_score = (
+        min(120, application_fields * 20)
+        + min(50, file_uploads * 40)
+        + min(60, application_signal_count * 15)
+        + (30 if is_application_url(content_url) else 0)
+    )
+
+    # A specific ATS job URL with a substantial description is final even when
+    # the application form is rendered below it or related jobs appear smaller.
+    conclusive_individual = bool(
+        specific_url_evidence
+        and specific_role_evidence
+        and description_length >= MIN_DESCRIPTION_LENGTH
+        and similarly_prominent_roles <= 2
+    )
+
+    # Non-standard company-hosted detail pages can also qualify, but require
+    # stronger text evidence and little board structure.
+    if not conclusive_individual:
+        conclusive_individual = bool(
+            specific_role_evidence
+            and description_length >= STRONG_DESCRIPTION_LENGTH
+            and similarly_prominent_roles <= 1
+            and len(direct_jobs) <= 1
+            and repeated_job_cards <= 1
+            and filter_controls == 0
+        )
+
+    application_only = bool(
+        not conclusive_individual
+        and description_length < MIN_DESCRIPTION_LENGTH
+        and application_fields >= 2
+        and (
+            file_uploads >= 1
+            or application_signal_count >= 1
+            or is_application_url(content_url)
+        )
+    )
+
+    has_board_structure = bool(
+        len(direct_jobs) >= 2
+        or distinct_role_count >= 2
+        or repeated_job_cards >= 2
+        or filter_controls >= 2
+        or len(records) > 1
+    )
+
+    if conclusive_individual:
+        stage = "detail"
+    elif application_only:
+        stage = "application"
+    elif has_board_structure or board_score >= 100:
+        stage = "board"
+    else:
+        stage = "landing"
+
+    final_job_url: str | None = None
+
+    if conclusive_individual:
+        if len(records) == 1 and records[0].get("url") and not is_application_url(
+            str(records[0]["url"])
+        ):
+            final_job_url = clean_url(str(records[0]["url"]))
+        else:
+            final_job_url = content_url
 
     try:
         title = page.title().strip()
-
     except PlaywrightError:
         title = ""
 
-    try:
-        heading = page.locator(
-            "h1"
-        ).first.inner_text(
-            timeout=2_000
-        ).strip()
+    heading = specific_role_title
+    summary = longest_main[:1800]
 
-    except PlaywrightError:
-        heading = ""
-
-    try:
-        body = " ".join(
-            page.locator("body")
-            .inner_text(timeout=5_000)
-            .split()
-        )
-
-    except PlaywrightError:
-        body = ""
-
-    body_lower = body.lower()
-
-    structured_urls = jsonld_job_urls(page)
-
-    direct_jobs, actions = candidates(page)
-
-    view_job_count = sum(
-        "view job" in action.text.lower()
-        for action in actions
+    signature_source = (
+        f"{url_identity(page.url)}|{url_identity(content_url)}|"
+        f"{title}|{heading}|{summary[:700]}|{stage}|"
+        f"{len(direct_jobs)}|{len(discovery)}"
     )
-
-    apply_count = sum(
-        "apply" in action.text.lower()
-        for action in actions
-    )
-
-    board_score = 30 * sum(
-        signal in body_lower
-        for signal in BOARD_SIGNALS
-    )
-
-    board_score += min(
-        80,
-        max(
-            0,
-            view_job_count - 1,
-        ) * 25,
-    )
-
-    board_score += min(
-        80,
-        max(
-            0,
-            len(direct_jobs) - 1,
-        ) * 20,
-    )
-
-    if len(structured_urls) > 1:
-        board_score += 120
-
-    if is_ats(page.url):
-        board_score += 20
-
-    specific_score = 0
-
-    if len(structured_urls) == 1:
-        specific_score += 200
-
-    if looks_like_job_url(page.url):
-        specific_score += 120
-
-    if not is_generic_heading(heading):
-        specific_score += 35
-
-    specific_score += min(
-        90,
-        18 * sum(
-            signal in body_lower
-            for signal in DETAIL_SIGNALS
-        ),
-    )
-
-    if apply_count:
-        specific_score += 30
-
-    if view_job_count >= 2:
-        specific_score -= 100
-
-    if len(structured_urls) > 1:
-        specific_score -= 120
-
-    if board_score >= 100:
-        specific_score -= 50
-
-    final_url: str | None = None
-
-    if len(structured_urls) == 1:
-        final_url = structured_urls[0]
-
-    elif (
-        looks_like_job_url(page.url)
-        and specific_score >= 120
-        and len(direct_jobs) <= 2
-    ):
-        final_url = clean_url(page.url)
-
-    elif (
-        specific_score >= 150
-        and board_score < 90
-        and not is_generic_heading(heading)
-    ):
-        final_url = clean_url(page.url)
-
-    progress_score = (
-        max(0, board_score)
-        + max(0, specific_score)
-        + min(
-            75,
-            len(direct_jobs) * 15,
-        )
-    )
-
-    summary = body[:1600]
-
-    fingerprint = (
-        f"{clean_url(page.url)}|"
-        f"{title}|"
-        f"{heading}|"
-        f"{summary[:700]}|"
-        f"{len(direct_jobs)}"
-    )
-
     signature = hashlib.sha256(
-        fingerprint.encode(
-            "utf-8",
-            errors="ignore",
-        )
+        signature_source.encode("utf-8", errors="ignore")
     ).hexdigest()
 
     return Evidence(
-        url=clean_url(page.url),
+        page_url=clean_url(page.url),
+        content_url=content_url,
         title=title,
         heading=heading,
         summary=summary,
         direct_jobs=direct_jobs,
-        actions=actions,
+        discovery=discovery,
+        ambiguous_actions=ambiguous_actions,
+        distinct_role_count=distinct_role_count,
+        repeated_job_card_count=repeated_job_cards,
+        filter_control_count=filter_controls,
+        description_length=description_length,
+        application_field_count=application_fields,
+        file_upload_count=file_uploads,
         board_score=board_score,
-        progress_score=progress_score,
-        final_job_url=final_url,
+        detail_score=detail_score,
+        application_score=application_score,
+        specific_role_title=specific_role_title,
+        specific_role_evidence=specific_role_evidence,
+        specific_url_evidence=specific_url_evidence,
+        stage=stage,
+        conclusive_individual=conclusive_individual,
+        application_only=application_only,
+        final_job_url=final_job_url,
         signature=signature,
     )
 
 
-def progressed(
-    before: Evidence,
-    after: Evidence,
-) -> bool:
-    """Check whether navigation produced better job evidence."""
+def stage_rank(stage: str) -> int:
+    """Return directional progress rank."""
 
-    return bool(
-        after.final_job_url
-        or after.progress_score
-        >= before.progress_score + 15
-        or after.board_score
-        > before.board_score
-        or len(after.direct_jobs)
-        > len(before.direct_jobs)
-        or (
-            after.url != before.url
-            and is_ats(after.url)
-            and not is_ats(before.url)
-        )
-    )
+    return {
+        "application": -1,
+        "landing": 0,
+        "board": 1,
+        "detail": 2,
+    }.get(stage, 0)
+
+
+def compare_progress(before: Evidence, after: Evidence) -> tuple[bool, str]:
+    """Compare two states directionally rather than by raw link count."""
+
+    if after.conclusive_individual:
+        return True, "one dominant job description found"
+
+    if after.application_only:
+        return False, "reached an application-only page"
+
+    old_rank = stage_rank(before.stage)
+    new_rank = stage_rank(after.stage)
+
+    if new_rank > old_rank:
+        return True, f"advanced from {before.stage} to {after.stage}"
+
+    if new_rank < old_rank:
+        return False, f"regressed from {before.stage} to {after.stage}"
+
+    if after.stage == "board":
+        if len(after.direct_jobs) > len(before.direct_jobs):
+            return (
+                True,
+                f"job links {len(before.direct_jobs)} -> {len(after.direct_jobs)}",
+            )
+
+        if after.board_score > before.board_score + 25:
+            return True, "job-board evidence increased"
+
+    if after.stage == "landing":
+        if not is_ats(before.content_url) and is_ats(after.content_url):
+            return True, "reached a recruiting platform"
+
+        if after.board_score > before.board_score + 40:
+            return True, "job evidence increased"
+
+    changed_url = url_identity(after.content_url) != url_identity(before.content_url)
+
+    if changed_url and after.detail_score > before.detail_score + 40:
+        return True, "job-description evidence increased"
+
+    return False, "job evidence did not improve"
 
 
 def open_page(
@@ -935,7 +1823,7 @@ def open_page(
     url: str,
     root: bool = False,
 ) -> Page | None:
-    """Open one URL in an isolated browser page."""
+    """Open a URL in an isolated page and wait once for dynamic content."""
 
     page = context.new_page()
 
@@ -946,261 +1834,262 @@ def open_page(
             timeout=30_000,
         )
 
-        if (
-            response is not None
-            and response.status >= 400
-        ):
+        if response is not None and response.status >= 400:
             if root:
                 raise JobFinderError(
-                    f"Careers page returned HTTP "
-                    f"{response.status}."
+                    f"Careers page returned HTTP {response.status}."
                 )
 
             page.close()
             return None
 
-        page.wait_for_timeout(700)
+        wait_for_dynamic_content(page)
+
+        if dismiss_cookie_banner(page):
+            wait_for_dynamic_content(page)
 
         return page
 
-    except (
-        PlaywrightTimeoutError,
-        PlaywrightError,
-    ) as exc:
+    except (PlaywrightTimeoutError, PlaywrightError) as exc:
         page.close()
 
         if root:
-            raise JobFinderError(
-                f"Could not open careers page: {exc}"
-            ) from exc
+            raise JobFinderError(f"Could not open careers page: {exc}") from exc
 
         return None
+
+
+def find_frame(page: Page, candidate: Candidate) -> Frame | None:
+    """Locate the frame that originally produced a candidate."""
+
+    for frame in list(page.frames):
+        if candidate.frame_name and frame.name == candidate.frame_name:
+            return frame
+
+        if candidate.frame_url and frame.url:
+            try:
+                if url_identity(frame.url) == url_identity(candidate.frame_url):
+                    return frame
+            except JobFinderError:
+                if frame.url == candidate.frame_url:
+                    return frame
+
+    return None
+
+
+def find_locator(frame: Frame, candidate: Candidate):
+    """Locate a previously collected clickable after recreating its page."""
+
+    base = frame.locator(CLICKABLE_SELECTOR)
+
+    if candidate.text:
+        exact = base.filter(
+            has_text=re.compile(
+                rf"^\s*{re.escape(candidate.text.strip())}\s*$",
+                re.IGNORECASE,
+            )
+        )
+
+        try:
+            if exact.count() > 0:
+                return exact.first
+        except PlaywrightError:
+            pass
+
+    if candidate.index is not None:
+        return base.nth(candidate.index)
+
+    return None
 
 
 def follow(
     context: BrowserContext,
     source_url: str,
-    action: Candidate,
+    candidate: Candidate,
 ) -> Page | None:
-    """Follow an action using its URL or browser click."""
+    """Follow a direct URL or click an element inside its original frame."""
 
-    if action.url:
-        return open_page(
-            context,
-            action.url,
-        )
+    if candidate.url:
+        return open_page(context, candidate.url)
 
-    if action.index is None:
+    if candidate.index is None:
         return None
 
-    page = open_page(
-        context,
-        source_url,
-    )
+    page = open_page(context, source_url)
 
     if page is None:
         return None
 
-    selector = (
-        "a[href], button, [role='button'], "
-        "input[type='button'], input[type='submit']"
-    )
+    frame = find_frame(page, candidate)
+
+    if frame is None:
+        page.close()
+        return None
+
+    locator = find_locator(frame, candidate)
+
+    if locator is None:
+        page.close()
+        return None
 
     pages_before = list(context.pages)
 
     try:
-        locator = page.locator(
-            selector
-        ).nth(action.index)
+        locator.scroll_into_view_if_needed(timeout=5_000)
+        locator.click(timeout=10_000)
+        page.wait_for_timeout(700)
 
-        locator.scroll_into_view_if_needed(
-            timeout=5_000
-        )
-
-        locator.click(
-            timeout=10_000
-        )
-
-        page.wait_for_timeout(1_000)
-
-        new_pages = [
-            candidate
-            for candidate in context.pages
-            if candidate not in pages_before
-        ]
+        new_pages = [item for item in context.pages if item not in pages_before]
 
         if new_pages:
             destination = new_pages[-1]
 
             try:
-                destination.wait_for_load_state(
-                    "domcontentloaded",
-                    timeout=15_000,
-                )
-
+                destination.wait_for_load_state("domcontentloaded", timeout=12_000)
             except PlaywrightError:
                 pass
 
             page.close()
+            wait_for_dynamic_content(destination)
+
+            if dismiss_cookie_banner(destination):
+                wait_for_dynamic_content(destination)
 
             return destination
 
+        wait_for_dynamic_content(page)
+
+        if dismiss_cookie_banner(page):
+            wait_for_dynamic_content(page)
+
         return page
 
-    except (
-        PlaywrightTimeoutError,
-        PlaywrightError,
-    ):
+    except (PlaywrightTimeoutError, PlaywrightError):
         page.close()
-
         return None
 
 
-def short_label(
-    candidate: Candidate,
-) -> str:
-    """Create a concise console label."""
+def short_label(candidate: Candidate) -> str:
+    """Create a concise label for logs."""
 
-    text = " ".join(
-        candidate.text.split()
-    )
+    role_title = " ".join(candidate.role_title.split())
+    text = " ".join(candidate.text.split())
+
+    if role_title and text and role_title.lower() != text.lower():
+        return f"{role_title} — {text}"[:72]
+
+    if role_title:
+        return role_title[:72]
 
     if text:
-        return text[:60]
+        return text[:72]
 
     parsed = urlsplit(candidate.url)
-
-    return (
-        f"{parsed.netloc}{parsed.path}"
-    )[:60]
+    return f"{parsed.netloc}{parsed.path}"[:72]
 
 
-def ordered_actions(
-    evidence: Evidence,
-    state: State,
-) -> list[Candidate]:
-    """Order actions using rules or AI when ambiguous."""
+def choose_ambiguous_action(evidence: Evidence) -> Candidate | None:
+    """Use one AI call to choose one genuinely ambiguous action."""
 
-    direct_urls = {
-        candidate.url
-        for candidate in evidence.direct_jobs
-    }
-
-    choices = [
-        action
-        for action in evidence.actions
-        if (
-            action.score > -120
-            and action.url not in direct_urls
-            and action.key(evidence.url)
-            not in state.attempted
-        )
-    ][:MAX_AI_ACTIONS]
+    choices = evidence.ambiguous_actions[:MAX_AI_ACTIONS]
 
     if not choices:
-        return []
-
-    positive = [
-        action
-        for action in choices
-        if action.score > 0
-    ]
-
-    if positive:
-        second_score = (
-            positive[1].score
-            if len(positive) > 1
-            else -999
-        )
-
-        if (
-            positive[0].score >= 130
-            and positive[0].score
-            - second_score >= 35
-        ):
-            best = positive[0]
-
-            log(
-                "rules",
-                (
-                    f'Trying strong action '
-                    f'"{short_label(best)}".'
-                ),
-            )
-
-            remaining = [
-                item
-                for item in choices
-                if item != best
-            ]
-
-            return [
-                best,
-                *remaining,
-            ][:MAX_ACTIONS_PER_PAGE]
+        return None
 
     payload = [
         {
-            "text": action.text,
-            "url": action.url,
-            "context": action.context,
-            "score": action.score,
+            "text": candidate.role_title or candidate.text,
+            "url": candidate.url,
+            "context": candidate.context,
+            "score": candidate.score,
             "element_type": "clickable",
         }
-        for action in choices
+        for candidate in choices
     ]
 
-    ordered: list[Candidate] = []
-
     try:
-        selection = select_next_job_action(
-            page_url=evidence.url,
+        result = select_next_job_action(
+            page_url=evidence.content_url,
             page_title=evidence.title,
             page_heading=evidence.heading,
             page_summary=evidence.summary,
-            progress_score=evidence.progress_score,
+            progress_score=evidence.board_score + evidence.detail_score,
             actions=payload,
         )
-
-        if selection.action_id is not None:
-            chosen = choices[
-                selection.action_id - 1
-            ]
-
-            reason = " ".join(
-                selection.reason.split()
-            )[:120]
-
-            log(
-                "ai",
-                (
-                    f'Chose "{short_label(chosen)}" '
-                    f"({selection.confidence:.0%}): "
-                    f"{reason}"
-                ),
-            )
-
-            ordered.append(chosen)
-
-        else:
-            log(
-                "ai",
-                "No useful action selected.",
-            )
-
     except JobAISelectorError as exc:
-        log(
-            "ai",
-            f"Skipped: {exc}",
-        )
+        log("ai", f"Skipped: {exc}")
+        return None
 
-    ordered.extend(
-        item
-        for item in choices
-        if item not in ordered
+    if result.action_id is None:
+        log("ai", "No useful ambiguous action selected.")
+        return None
+
+    chosen = choices[result.action_id - 1]
+    reason = " ".join(result.reason.split())[:120]
+
+    log(
+        "ai",
+        f'Chose "{short_label(chosen)}" '
+        f"({result.confidence:.0%}): {reason}",
     )
 
-    return ordered[:MAX_ACTIONS_PER_PAGE]
+    return chosen
+
+
+def explore_candidate(
+    *,
+    context: BrowserContext,
+    source_evidence: Evidence,
+    candidate: Candidate,
+    depth: int,
+    state: State,
+) -> str | None:
+    """Follow one branch, assess progress, and backtrack when necessary."""
+
+    if not state.can_try():
+        return None
+
+    key = candidate.key(source_evidence.page_url)
+
+    if key in state.attempted:
+        return None
+
+    state.attempted.add(key)
+    state.attempts += 1
+
+    log("act", f'Following "{short_label(candidate)}".')
+
+    branch = follow(
+        context=context,
+        source_url=source_evidence.page_url,
+        candidate=candidate,
+    )
+
+    if branch is None:
+        log("backtrack", "Action could not be completed.")
+        return None
+
+    try:
+        next_evidence = inspect(branch)
+        improved, reason = compare_progress(source_evidence, next_evidence)
+
+        if not improved:
+            log("backtrack", f"{reason.capitalize()}.")
+            return None
+
+        log("progress", f"{reason.capitalize()}.")
+
+        return explore(
+            context=context,
+            page=branch,
+            evidence=next_evidence,
+            depth=depth + 1,
+            state=state,
+        )
+
+    finally:
+        if not branch.is_closed():
+            branch.close()
 
 
 def explore(
@@ -1210,7 +2099,7 @@ def explore(
     depth: int,
     state: State,
 ) -> str | None:
-    """Explore a page using bounded navigation and backtracking."""
+    """Explore deterministically first and use AI only for one vague action."""
 
     if evidence.signature in state.visited:
         return None
@@ -1220,185 +2109,106 @@ def explore(
     log(
         "inspect",
         (
-            f"Depth {depth}: "
-            f"progress {evidence.progress_score}, "
-            f"{len(evidence.direct_jobs)} job links."
+            f"Depth {depth}: {evidence.stage}; "
+            f"jobs={len(evidence.direct_jobs)}, "
+            f"discover={len(evidence.discovery)}, "
+            f"roles={evidence.distinct_role_count}, "
+            f"description={evidence.description_length}, "
+            f"app_fields={evidence.application_field_count}."
         ),
     )
 
-    if evidence.final_job_url:
-        log(
-            "found",
-            "Specific job page verified.",
-        )
-
+    # The goal has been reached. Do not click Apply, Back to jobs, alerts,
+    # account links, logos, menus, or any other controls on this page.
+    if evidence.conclusive_individual and evidence.final_job_url:
+        log("found", "Verified one dominant job description.")
         return evidence.final_job_url
 
-    if (
-        depth >= MAX_DEPTH
-        or not state.can_try()
-    ):
+    if depth >= MAX_DEPTH or not state.can_try():
         return None
 
-    for candidate in evidence.direct_jobs[
-        :MAX_DIRECT_JOB_LINKS
-    ]:
-        if not state.can_try():
-            break
+    if evidence.application_only:
+        parent = application_parent_url(evidence.content_url)
+        parent_key = f"parent:{url_identity(parent)}" if parent else ""
 
-        key = candidate.key(evidence.url)
+        if (
+            parent
+            and state.can_try()
+            and parent_key not in state.attempted
+        ):
+            state.attempted.add(parent_key)
+            state.attempts += 1
+            log("backtrack", "Application-only page; checking parent job URL.")
 
-        if key in state.attempted:
-            continue
+            branch = open_page(context, parent)
 
-        state.attempted.add(key)
-        state.attempts += 1
+            if branch is not None:
+                try:
+                    result = explore(
+                        context=context,
+                        page=branch,
+                        evidence=inspect(branch),
+                        depth=depth + 1,
+                        state=state,
+                    )
 
-        log(
-            "try",
-            (
-                f'Opening job candidate '
-                f'"{short_label(candidate)}".'
-            ),
-        )
+                    if result:
+                        return result
+                finally:
+                    if not branch.is_closed():
+                        branch.close()
 
-        branch = open_page(
-            context,
-            candidate.url,
-        )
+        return None
 
-        if branch is None:
-            continue
-
-        try:
-            branch_evidence = inspect(branch)
-
-            if not progressed(
-                evidence,
-                branch_evidence,
-            ):
-                log(
-                    "backtrack",
-                    (
-                        "Job link did not improve "
-                        "job evidence."
-                    ),
-                )
-
-                continue
-
-            result = explore(
-                context=context,
-                page=branch,
-                evidence=branch_evidence,
-                depth=depth + 1,
-                state=state,
-            )
-
-            if result:
-                return result
-
-        finally:
-            if not branch.is_closed():
-                branch.close()
-
-    for action in ordered_actions(
-        evidence,
-        state,
-    ):
-        if not state.can_try():
-            break
-
-        key = action.key(evidence.url)
-
-        if key in state.attempted:
-            continue
-
-        state.attempted.add(key)
-        state.attempts += 1
-
-        log(
-            "act",
-            (
-                f'Following '
-                f'"{short_label(action)}".'
-            ),
-        )
-
-        branch = follow(
+    # A job board should open one specific role before considering anything else.
+    for candidate in evidence.direct_jobs[:MAX_DIRECT_JOB_LINKS]:
+        result = explore_candidate(
             context=context,
-            source_url=evidence.url,
-            action=action,
+            source_evidence=evidence,
+            candidate=candidate,
+            depth=depth,
+            state=state,
         )
 
-        if branch is None:
-            log(
-                "backtrack",
-                "Action could not be completed.",
-            )
+        if result:
+            return result
 
-            continue
+    # A landing page should follow obvious discovery actions with no AI call.
+    for candidate in evidence.discovery[:MAX_DISCOVERY_ACTIONS]:
+        log("rules", f'Strong discovery action: "{short_label(candidate)}".')
 
-        try:
-            branch_evidence = inspect(branch)
+        result = explore_candidate(
+            context=context,
+            source_evidence=evidence,
+            candidate=candidate,
+            depth=depth,
+            state=state,
+        )
 
-            if not progressed(
-                evidence,
-                branch_evidence,
-            ):
-                log(
-                    "backtrack",
-                    (
-                        "Action did not improve "
-                        "job evidence."
-                    ),
-                )
+        if result:
+            return result
 
-                continue
+    # Only one ambiguous AI-selected action is tried. We do not append and click
+    # every remaining control on the page.
+    chosen = choose_ambiguous_action(evidence)
 
-            log(
-                "progress",
-                (
-                    f"Score "
-                    f"{evidence.progress_score} -> "
-                    f"{branch_evidence.progress_score}."
-                ),
-            )
-
-            result = explore(
-                context=context,
-                page=branch,
-                evidence=branch_evidence,
-                depth=depth + 1,
-                state=state,
-            )
-
-            if result:
-                return result
-
-        finally:
-            if not branch.is_closed():
-                branch.close()
+    if chosen is not None:
+        return explore_candidate(
+            context=context,
+            source_evidence=evidence,
+            candidate=chosen,
+            depth=depth,
+            state=state,
+        )
 
     return None
 
 
-def search_for_job(
-    careers_url: str,
-    headless: bool,
-) -> str:
-    """Search for one job using one browser mode."""
+def search_for_job(careers_url: str, headless: bool) -> str:
+    """Search for one specific job in one browser mode."""
 
-    mode = (
-        "headless"
-        if headless
-        else "visible"
-    )
-
-    log(
-        "browser",
-        f"Searching for a job in {mode} mode.",
-    )
+    mode = "headless" if headless else "visible"
+    log("browser", f"Searching for a job in {mode} mode.")
 
     try:
         with sync_playwright() as playwright:
@@ -1406,27 +2216,16 @@ def search_for_job(
                 headless=headless,
                 channel="chromium",
             )
-
             context = browser.new_context(
-                viewport={
-                    "width": 1440,
-                    "height": 1000,
-                }
+                viewport={"width": 1440, "height": 1000}
             )
-
             root: Page | None = None
 
             try:
-                root = open_page(
-                    context,
-                    careers_url,
-                    root=True,
-                )
+                root = open_page(context, careers_url, root=True)
 
                 if root is None:
-                    raise JobFinderError(
-                        "Could not open the careers page."
-                    )
+                    raise JobFinderError("Could not open the careers page.")
 
                 result = explore(
                     context=context,
@@ -1440,10 +2239,7 @@ def search_for_job(
                     return result
 
             finally:
-                if (
-                    root is not None
-                    and not root.is_closed()
-                ):
+                if root is not None and not root.is_closed():
                     root.close()
 
                 context.close()
@@ -1451,54 +2247,30 @@ def search_for_job(
 
     except JobFinderError:
         raise
-
-    except (
-        PlaywrightTimeoutError,
-        PlaywrightError,
-    ) as exc:
+    except (PlaywrightTimeoutError, PlaywrightError) as exc:
         raise JobFinderError(
             f"Browser error while finding a job: {exc}"
         ) from exc
 
     raise JobFinderError(
-        "A specific open-job URL was not found "
-        "within the search limits."
+        "A specific open-job URL was not found within the search limits."
     )
 
 
-def find_one_job_post(
-    careers_page_url: str,
-) -> str:
-    """Return one specific open-job URL from a careers page."""
+def find_one_job_post(careers_page_url: str) -> str:
+    """Return one specific open-job description URL from a careers page."""
 
-    careers_url = clean_url(
-        careers_page_url
-    )
-
-    log(
-        "jobs",
-        careers_url,
-    )
+    careers_url = clean_url(careers_page_url)
+    log("jobs", careers_url)
 
     try:
         return search_for_job(
             careers_url=careers_url,
             headless=True,
         )
-
-    except JobFinderError as headless_error:
-        log(
-            "browser",
-            (
-                f"Headless job search failed: "
-                f"{headless_error}"
-            ),
-        )
-
-        log(
-            "browser",
-            "Retrying job search visibly.",
-        )
+    except JobFinderError as exc:
+        log("browser", f"Headless job search failed: {exc}")
+        log("browser", "Retrying job search visibly.")
 
         return search_for_job(
             careers_url=careers_url,
